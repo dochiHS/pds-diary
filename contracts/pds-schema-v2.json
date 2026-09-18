@@ -1,0 +1,185 @@
+{
+  "schema": "pds-schema-v2",
+  "title": "플랜두씨 다이어리 1 (ALEPH T06) 최종 데이터베이스 구조",
+  "database": "Supabase (PostgreSQL), public 스키마의 표 6개 + 내부 전용 pds_private 스키마",
+  "source_sql": "supabase/schema.sql",
+  "flow": "plans(계획) → tasks(할 일) → run_logs(실행 기록) · task_completions(완료 기록) → reviews(돌아보기) → plans.carried_from_review_id(다음 계획)",
+
+  "rules": {
+    "ids": "모든 표의 id는 bigint identity(1부터 차례로 붙음). 한 번 붙은 ID는 바뀌지 않는다. 계획을 고쳐도 plans.id는 그대로다.",
+    "date": "date 칸(start_date, end_date, due_date)은 서울(Asia/Seoul) 달력 날짜 'YYYY-MM-DD'. 시간대 변환을 하지 않는다.",
+    "timestamptz": "timestamptz 칸(*_at)은 절대 시각으로 저장한다(API 응답은 UTC 오프셋이 붙은 ISO 8601). 화면은 브라우저 시간대와 상관없이 서울 시간(KST, UTC+9)으로 보여 준다.",
+    "input_time": "화면의 datetime-local 입력값 'YYYY-MM-DDTHH:mm'은 서울 시간으로 해석해 '+09:00'을 붙여 보낸다.",
+    "today": "'오늘'은 DB가 계산한 (now() at time zone 'Asia/Seoul')::date 이다.",
+    "minutes": "*_minutes 칸은 모두 '분' 단위 정수. 화면도 '분'으로 보여 주고, 60분 이상이면 '(N시간 M분)'을 곁들인다.",
+    "soft_delete": "할 일과 실행 기록은 지워도 행을 남기고 deleted_at만 채운다. deleted_at이 있으면 목록·집계에서 빠진다.",
+    "history": "계획을 고치면 트리거가 고치기 전 판을 plan_revisions에 한 줄 쌓고 plans.revision을 1 올린다. plan_revisions는 고치거나 지울 수 없다.",
+    "idempotency": "만들기·완료·기록 요청은 브라우저가 만든 request_key(uuid)를 함께 보낸다. 같은 키가 다시 오면 새로 만들지 않고 처음 결과를 돌려준다.",
+    "double_completion": "task_completions에는 할 일 하나당 되돌리지 않은(reverted_at is null) 완료 기록이 1건만 있을 수 있다(부분 유일 인덱스). 완료 함수는 할 일 행을 잠그고(FOR UPDATE) 이미 완료 상태면 새 기록을 만들지 않는다.",
+    "text_rendering": "사용자가 넣은 글자는 DB에 그대로 저장하고, 화면에는 textContent로만 넣는다(HTML로 해석하지 않음)."
+  },
+
+  "tables": {
+    "plans": {
+      "meaning": "계획(Plan)의 지금 값",
+      "primary_key": ["id"],
+      "columns": {
+        "id":                     { "type": "bigint", "null": false, "default": "identity", "meaning": "계획 ID" },
+        "title":                  { "type": "text", "null": false, "check": "1~120자", "meaning": "계획 이름" },
+        "success_criteria":       { "type": "text", "null": false, "check": "1~500자", "meaning": "성공 기준" },
+        "start_date":             { "type": "date", "null": false, "meaning": "기간 시작일(서울 날짜)" },
+        "end_date":               { "type": "date", "null": false, "check": "start_date 이상, 기간 366일 이하", "meaning": "기간 끝일(서울 날짜)" },
+        "priority":               { "type": "smallint", "null": false, "default": 2, "check": "1(높음)~3(낮음)", "meaning": "우선순위" },
+        "estimated_minutes":      { "type": "integer", "null": false, "check": "1~100000", "unit": "분", "meaning": "계획 전체 예상 시간" },
+        "revision":               { "type": "integer", "null": false, "default": 1, "meaning": "지금 판 번호. 고칠 때마다 1 오름(트리거)" },
+        "carried_from_review_id": { "type": "bigint", "null": true, "unique": true, "references": "reviews.id", "meaning": "고칠 점을 넘겨받은 돌아보기" },
+        "request_key":            { "type": "uuid", "null": true, "unique": true, "meaning": "같은 만들기 요청을 알아보는 키" },
+        "created_at":             { "type": "timestamptz", "null": false, "default": "now()", "meaning": "처음 만든 때" },
+        "updated_at":             { "type": "timestamptz", "null": false, "default": "now()", "meaning": "마지막으로 내용이 바뀐 때(트리거)" }
+      }
+    },
+    "plan_revisions": {
+      "meaning": "계획 수정 이력. 계획을 고칠 때마다 '고치기 전' 판이 한 줄씩 쌓임(추가만 가능)",
+      "primary_key": ["id"],
+      "unique": [["plan_id", "revision"]],
+      "columns": {
+        "id":                { "type": "bigint", "null": false, "default": "identity", "meaning": "이력 ID" },
+        "plan_id":           { "type": "bigint", "null": false, "references": "plans.id", "meaning": "어느 계획의 이력인지" },
+        "revision":          { "type": "integer", "null": false, "meaning": "이 줄이 담은 판 번호" },
+        "title":             { "type": "text", "null": false, "meaning": "그 판의 계획 이름" },
+        "success_criteria":  { "type": "text", "null": false, "meaning": "그 판의 성공 기준" },
+        "start_date":        { "type": "date", "null": false, "meaning": "그 판의 시작일" },
+        "end_date":          { "type": "date", "null": false, "meaning": "그 판의 끝일" },
+        "priority":          { "type": "smallint", "null": false, "meaning": "그 판의 우선순위" },
+        "estimated_minutes": { "type": "integer", "null": false, "unit": "분", "meaning": "그 판의 예상 시간" },
+        "valid_from":        { "type": "timestamptz", "null": false, "meaning": "그 판이 쓰이기 시작한 때" },
+        "replaced_at":       { "type": "timestamptz", "null": false, "default": "now()", "meaning": "다음 판으로 바뀐 때" },
+        "change_reason":     { "type": "text", "null": true, "check": "300자 이하", "meaning": "그 판을 고친 이유" }
+      }
+    },
+    "tasks": {
+      "meaning": "할 일(Do) — 계획에 딸린 할 일",
+      "primary_key": ["id"],
+      "columns": {
+        "id":                { "type": "bigint", "null": false, "default": "identity", "meaning": "할 일 ID" },
+        "plan_id":           { "type": "bigint", "null": false, "references": "plans.id", "meaning": "딸린 계획" },
+        "title":             { "type": "text", "null": false, "check": "1~200자", "meaning": "할 일 내용" },
+        "note":              { "type": "text", "null": true, "check": "2000자 이하", "meaning": "메모" },
+        "due_date":          { "type": "date", "null": true, "meaning": "마감일(서울 날짜). 없으면 지연으로 세지 않음" },
+        "priority":          { "type": "smallint", "null": false, "default": 2, "check": "1(높음)~3(낮음)", "meaning": "우선순위" },
+        "tags":              { "type": "text[]", "null": false, "default": "{}", "check": "10개 이하, 하나에 1~20자, 앞뒤 공백·중복 없음", "meaning": "태그" },
+        "estimated_minutes": { "type": "integer", "null": false, "default": 0, "check": "0~100000", "unit": "분", "meaning": "예상 시간" },
+        "status":            { "type": "text", "null": false, "default": "open", "check": "'open'(진행 중) | 'done'(완료)", "meaning": "상태" },
+        "completed_at":      { "type": "timestamptz", "null": true, "check": "status='done'일 때만 값이 있음", "meaning": "완료한 때" },
+        "deleted_at":        { "type": "timestamptz", "null": true, "meaning": "지운 때(값이 있으면 목록·집계에서 빠짐)" },
+        "request_key":       { "type": "uuid", "null": true, "unique": true, "meaning": "같은 만들기 요청을 알아보는 키" },
+        "created_at":        { "type": "timestamptz", "null": false, "default": "now()", "meaning": "만든 때" },
+        "updated_at":        { "type": "timestamptz", "null": false, "default": "now()", "meaning": "마지막으로 바뀐 때(트리거)" }
+      }
+    },
+    "task_completions": {
+      "meaning": "완료 기록. 완료 버튼 요청 하나(같은 요청 키)는 한 건. 되돌리면 reverted_at이 채워짐(지우지 않음)",
+      "primary_key": ["id"],
+      "unique": [["request_key"]],
+      "partial_unique": [{ "columns": ["task_id"], "where": "reverted_at is null", "name": "task_completions_one_active" }],
+      "columns": {
+        "id":           { "type": "bigint", "null": false, "default": "identity", "meaning": "완료 기록 ID" },
+        "task_id":      { "type": "bigint", "null": false, "references": "tasks.id", "meaning": "완료한 할 일" },
+        "request_key":  { "type": "uuid", "null": false, "unique": true, "meaning": "완료 요청을 알아보는 키" },
+        "completed_at": { "type": "timestamptz", "null": false, "default": "now()", "meaning": "완료한 때" },
+        "reverted_at":  { "type": "timestamptz", "null": true, "check": "completed_at 이후", "meaning": "진행 중으로 되돌린 때" }
+      }
+    },
+    "run_logs": {
+      "meaning": "실행 기록(실제로 한 일). 계획·할 일의 예상 값을 덮어쓰지 않는 별도 표",
+      "primary_key": ["id"],
+      "columns": {
+        "id":             { "type": "bigint", "null": false, "default": "identity", "meaning": "실행 기록 ID" },
+        "task_id":        { "type": "bigint", "null": false, "references": "tasks.id", "meaning": "기록이 붙은 할 일" },
+        "started_at":     { "type": "timestamptz", "null": false, "meaning": "시작 시각" },
+        "ended_at":       { "type": "timestamptz", "null": false, "check": "started_at 이상, 24시간 이내", "meaning": "끝난 시각" },
+        "actual_minutes": { "type": "integer", "null": false, "check": "0 이상, 시작~끝 사이 분 이하", "unit": "분", "meaning": "실제로 걸린 시간(쉰 시간 뺄 수 있음, 비우면 시작~끝)" },
+        "blocked_reason": { "type": "text", "null": true, "check": "1~500자(빈 글자는 null로 저장)", "meaning": "막혔던 이유" },
+        "note":           { "type": "text", "null": true, "check": "1000자 이하", "meaning": "메모" },
+        "request_key":    { "type": "uuid", "null": true, "unique": true, "meaning": "같은 저장 요청을 알아보는 키" },
+        "deleted_at":     { "type": "timestamptz", "null": true, "meaning": "취소한 때(값이 있으면 집계에서 빠짐)" },
+        "created_at":     { "type": "timestamptz", "null": false, "default": "now()", "meaning": "저장한 때" }
+      }
+    },
+    "reviews": {
+      "meaning": "돌아보기(See). 돌아본 내용 + 다음 계획으로 넘길 고칠 점 한 줄 + 저장 시점 집계",
+      "primary_key": ["id"],
+      "columns": {
+        "id":          { "type": "bigint", "null": false, "default": "identity", "meaning": "돌아보기 ID" },
+        "plan_id":     { "type": "bigint", "null": false, "references": "plans.id", "meaning": "돌아본 계획" },
+        "reflection":  { "type": "text", "null": true, "check": "2000자 이하", "meaning": "돌아본 내용" },
+        "next_fix":    { "type": "text", "null": false, "check": "1~200자", "meaning": "다음 계획으로 넘길 고칠 점 한 줄" },
+        "stats":       { "type": "jsonb", "null": false, "meaning": "저장 시점 숫자 {today_kst, planned, done, overdue, blocked, estimated_minutes, actual_minutes, diff_minutes}" },
+        "request_key": { "type": "uuid", "null": true, "unique": true, "meaning": "같은 저장 요청을 알아보는 키" },
+        "created_at":  { "type": "timestamptz", "null": false, "default": "now()", "meaning": "저장한 때" }
+      }
+    }
+  },
+
+  "relations": [
+    { "from": "plan_revisions.plan_id", "to": "plans.id", "cardinality": "계획 1 : 이력 N", "on_delete": "restrict" },
+    { "from": "tasks.plan_id", "to": "plans.id", "cardinality": "계획 1 : 할 일 N", "on_delete": "restrict" },
+    { "from": "task_completions.task_id", "to": "tasks.id", "cardinality": "할 일 1 : 완료 기록 N (살아 있는 것은 최대 1)", "on_delete": "restrict" },
+    { "from": "run_logs.task_id", "to": "tasks.id", "cardinality": "할 일 1 : 실행 기록 N", "on_delete": "restrict" },
+    { "from": "reviews.plan_id", "to": "plans.id", "cardinality": "계획 1 : 돌아보기 N", "on_delete": "restrict" },
+    { "from": "plans.carried_from_review_id", "to": "reviews.id", "cardinality": "돌아보기 1 : 넘겨받은 다음 계획 0..1 (unique)", "on_delete": "restrict" }
+  ],
+
+  "triggers": [
+    { "table": "plans", "name": "plans_keep_revision", "when": "before update", "does": "내용(이름·성공 기준·기간·우선순위·예상 시간)이 바뀌면 고치기 전 판을 plan_revisions에 넣고 revision+1, updated_at=now(). 내용이 같으면 아무것도 바꾸지 않음" },
+    { "table": "plan_revisions", "name": "plan_revisions_append_only", "when": "before update or delete", "does": "오류를 내서 이력을 고치거나 지우지 못하게 함" },
+    { "table": "tasks", "name": "tasks_touch_updated_at", "when": "before update", "does": "updated_at=now()" }
+  ],
+
+  "review_aggregation": {
+    "target_tasks": "이 계획에 딸린, 지우지 않은(deleted_at is null) 할 일",
+    "planned": "대상 할 일 수",
+    "done": "대상 할 일 중 status='done'인 수",
+    "overdue": "대상 할 일 중 status<>'done' 이고 due_date < 오늘(서울)인 수. 완료한 할 일은 세지 않는다",
+    "blocked": "대상 할 일 중 막힌 이유(blocked_reason, 공백 제외)가 적힌 취소 안 한 실행 기록이 하나라도 있는 수",
+    "estimated_minutes": "대상 할 일의 estimated_minutes 합계(없으면 0)",
+    "actual_minutes": "대상 할 일에 붙은 취소 안 한 실행 기록의 actual_minutes 합계(없으면 0)",
+    "diff_minutes": "actual_minutes - estimated_minutes (없으면 0)",
+    "evidence": "각 숫자와 함께 근거 ID 목록(task_ids / run_log_ids)을 같은 계산에서 돌려주어, 화면에서 숫자를 누르면 그 기록으로 갈 수 있다",
+    "computed_by": "pds_private.plan_summary(plan_id) — public.review_summary, public.get_plan_bundle, public.add_review가 함께 씀"
+  },
+
+  "api": {
+    "transport": "Supabase Data API(PostgREST) RPC: POST {SUPABASE_URL}/rest/v1/rpc/{함수 이름}, 본문은 이름 붙은 인자 JSON. 헤더 apikey = Publishable key",
+    "read": {
+      "ping()": "살아 있는지 확인(keepalive용)",
+      "list_plans()": "계획 목록(최근 순)",
+      "get_plan_bundle(p_plan_id)": "계획 하나의 계획·수정 이력·할 일(지연·막힘·실제 시간 포함)·실행 기록·완료 기록·돌아보기·집계",
+      "review_summary(p_plan_id)": "돌아보기 집계와 근거 ID",
+      "export_all()": "내 자료 전체(JSON 하나)"
+    },
+    "write": {
+      "create_plan(p_title, p_success_criteria, p_start_date, p_end_date, p_priority, p_estimated_minutes, p_carried_from_review_id, p_request_key)": "계획 만들기",
+      "update_plan(p_id, p_expected_revision, p_title, p_success_criteria, p_start_date, p_end_date, p_priority, p_estimated_minutes, p_change_reason)": "계획 고치기(판 번호가 다르면 거절)",
+      "carry_review(p_review_id, p_plan_id)": "고칠 점을 이미 있는 다른 계획으로 넘기기",
+      "create_task(p_plan_id, p_title, p_note, p_due_date, p_priority, p_tags, p_estimated_minutes, p_request_key)": "할 일 만들기",
+      "update_task(p_id, p_title, p_note, p_due_date, p_priority, p_tags, p_estimated_minutes)": "할 일 고치기",
+      "complete_task(p_id, p_request_key)": "완료로 바꾸기(중복 요청은 기록 1건)",
+      "reopen_task(p_id)": "진행 중으로 되돌리기",
+      "delete_task(p_id)": "할 일 지우기(soft delete)",
+      "restore_task(p_id)": "지운 할 일 되살리기",
+      "add_run_log(p_task_id, p_started_at, p_ended_at, p_actual_minutes, p_blocked_reason, p_note, p_request_key)": "실행 기록 남기기",
+      "delete_run_log(p_id)": "실행 기록 취소(soft delete)",
+      "add_review(p_plan_id, p_reflection, p_next_fix, p_request_key)": "돌아보기 저장(저장 시점 집계 포함)"
+    },
+    "errors": "입력이 규칙에 어긋나면 HTTP 400과 한국어 message를 돌려준다"
+  },
+
+  "security": {
+    "login": "없음(T06). 링크를 아는 사람은 누구나 보고 쓸 수 있다. 잠그는 일은 T07에서 한다",
+    "browser_key": "Publishable key(공개용)만 브라우저에 둔다. Secret key / service_role 키는 코드·배포 파일·Git 기록 어디에도 두지 않는다",
+    "table_access": "모든 표에 RLS를 켜고 anon·authenticated 역할에는 표 권한을 주지 않는다. 브라우저는 표를 직접 읽거나 쓸 수 없다",
+    "function_access": "위 api의 함수만 anon·authenticated에 EXECUTE를 준다. 함수는 security definer + search_path='' 로 만든다. 도우미 함수는 노출되지 않는 pds_private 스키마에 둔다",
+    "csp": "index.html에 Content-Security-Policy를 두어 스크립트는 같은 출처 파일만, 연결은 같은 출처와 *.supabase.co만 허용한다"
+  }
+}
