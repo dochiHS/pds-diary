@@ -1,4 +1,4 @@
-/* 플랜두씨 다이어리 — 어두운 바탕, 명조 제목, 색은 꼭 필요한 곳에만 */
+/* Plan · Do · See — 어두운 바탕, 명조 제목, 색은 꼭 필요한 곳에만 */
 :root {
   --bg: #121212;
   --surface: #1a1a1a;
@@ -62,7 +62,7 @@ b, strong { font-weight: 650; }
   padding-top: 28px; padding-bottom: 18px;
 }
 .brand h1 {
-  margin: 0; font-family: var(--serif); font-weight: 700; font-size: 30px; letter-spacing: -.01em;
+  margin: 0; font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, var(--serif); font-weight: 600; font-size: 31px; letter-spacing: .02em;
 }
 .tagline { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
 .top-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
