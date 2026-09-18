@@ -1,0 +1,36 @@
+# Supabase 무료 프로젝트는 일주일 동안 DB 사용이 없으면 일시정지됩니다.
+# 채점 전에 멈추지 않도록 하루 두 번 읽기 전용 함수 ping()을 부릅니다.
+# config.js에 들어 있는 공개용 값(Project URL, Publishable key)만 씁니다. 비밀값은 쓰지 않습니다.
+name: keepalive
+
+on:
+  schedule:
+    - cron: '17 0,12 * * *'   # 매일 09:17, 21:17 (서울 시간)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Supabase ping (read-only)
+        run: |
+          node -e '
+            global.window = {};
+            require("./config.js");
+            const c = window.PDS_CONFIG || {};
+            if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(c.SUPABASE_URL || "")) {
+              console.log("config.js에 Supabase 주소가 아직 없습니다. 건너뜁니다.");
+              process.exit(0);
+            }
+            const key = c.SUPABASE_PUBLISHABLE_KEY || "";
+            const headers = { "Content-Type": "application/json", apikey: key };
+            if (key.startsWith("eyJ")) headers.Authorization = "Bearer " + key;
+            fetch(c.SUPABASE_URL + "/rest/v1/rpc/ping", { method: "POST", headers, body: "{}" })
+              .then(async (r) => { console.log(r.status, await r.text()); if (!r.ok) process.exit(1); })
+              .catch((e) => { console.error(e); process.exit(1); });
+          '
