@@ -1,0 +1,796 @@
+{
+  "schema": "pds-schema-v3",
+  "title": "플랜두씨 다이어리 2 (ALEPH T07) 최종 데이터베이스 구조 — T06(pds-schema-v2, commit c55e544)에 가입·로그인을 이어 붙임",
+  "database": "Supabase (PostgreSQL), public 스키마의 표 9개 + 내부 전용 pds_private 스키마 + Supabase Auth의 auth.users·auth.sessions(읽기·참조만)",
+  "source_sql": "supabase/schema.sql",
+  "flow": "plans(계획) → tasks(할 일) → run_logs(실행 기록) · task_completions(완료 기록) → reviews(돌아보기) → plans.carried_from_review_id(다음 계획) · observations(5일 관찰 설정) → observation_days(하루 기록 5개) · observation_rule_changes(2일차 뒤·3일차 앞 계획 규칙 변경 1번)",
+  "rules": {
+    "ids": "모든 표의 id는 bigint identity(1부터 차례로 붙음). 한 번 붙은 ID는 바뀌지 않는다. 계획을 고쳐도 plans.id는 그대로다.",
+    "date": "date 칸(start_date, end_date, due_date)은 서울(Asia/Seoul) 달력 날짜 'YYYY-MM-DD'. 시간대 변환을 하지 않는다.",
+    "timestamptz": "timestamptz 칸(*_at)은 절대 시각으로 저장한다(API 응답은 UTC 오프셋이 붙은 ISO 8601). 화면은 브라우저 시간대와 상관없이 서울 시간(KST, UTC+9)으로 보여 준다.",
+    "input_time": "화면의 datetime-local 입력값 'YYYY-MM-DDTHH:mm'은 서울 시간으로 해석해 '+09:00'을 붙여 보낸다.",
+    "today": "'오늘'은 DB가 계산한 (now() at time zone 'Asia/Seoul')::date 이다.",
+    "minutes": "*_minutes 칸은 모두 '분' 단위 정수. 화면도 '분'으로 보여 주고, 60분 이상이면 '(N시간 M분)'을 곁들인다.",
+    "soft_delete": "할 일과 실행 기록은 지워도 행을 남기고 deleted_at만 채운다. deleted_at이 있으면 목록·집계에서 빠진다.",
+    "history": "계획을 고치면 트리거가 고치기 전 판을 plan_revisions에 한 줄 쌓고 plans.revision을 1 올린다. plan_revisions는 고치거나 지울 수 없다. 예외: 계정을 지울 때 그 계정의 이력은 함께 지워진다.",
+    "idempotency": "만들기·완료·기록 요청은 브라우저가 만든 request_key(uuid)를 함께 보낸다. 같은 키가 다시 오면 새로 만들지 않고 처음 결과를 돌려준다.",
+    "double_completion": "task_completions에는 할 일 하나당 되돌리지 않은(reverted_at is null) 완료 기록이 1건만 있을 수 있다(부분 유일 인덱스). 완료 함수는 할 일 행을 잠그고(FOR UPDATE) 이미 완료 상태면 새 기록을 만들지 않는다.",
+    "text_rendering": "사용자가 넣은 글자는 DB에 그대로 저장하고, 화면에는 textContent로만 넣는다(HTML로 해석하지 않음).",
+    "owner": "모든 행에 owner_id(auth.users.id)가 있다. 함수는 요청 토큰의 사용자(sub)와 owner_id가 같은 행만 찾는다. 남의 행과 없는 행은 똑같이 404로 답한다.",
+    "session": "요청마다 토큰의 session_id가 auth.sessions에 살아 있는지 확인한다. 로그아웃·비밀번호 변경·계정 삭제로 세션이 지워지면 같은 토큰도 401이다.",
+    "observation": "관찰 설정은 1일차 기록 전까지만 고칠 수 있다. 하루 기록의 날짜는 서버의 오늘(서울), 값은 기록 순간 서버가 센 \"관찰 시작 뒤 그날 완료한 할 일 수\". 5개까지, 3일차는 계획 규칙 변경 뒤에만."
+  },
+  "tables": {
+    "plans": {
+      "meaning": "계획(Plan)의 지금 값",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "계획 ID"
+        },
+        "title": {
+          "type": "text",
+          "null": false,
+          "check": "1~120자",
+          "meaning": "계획 이름"
+        },
+        "success_criteria": {
+          "type": "text",
+          "null": false,
+          "check": "1~500자",
+          "meaning": "성공 기준"
+        },
+        "start_date": {
+          "type": "date",
+          "null": false,
+          "meaning": "기간 시작일(서울 날짜)"
+        },
+        "end_date": {
+          "type": "date",
+          "null": false,
+          "check": "start_date 이상, 기간 366일 이하",
+          "meaning": "기간 끝일(서울 날짜)"
+        },
+        "priority": {
+          "type": "smallint",
+          "null": false,
+          "default": 2,
+          "check": "1(높음)~3(낮음)",
+          "meaning": "우선순위"
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "null": false,
+          "check": "1~100000",
+          "unit": "분",
+          "meaning": "계획 전체 예상 시간"
+        },
+        "revision": {
+          "type": "integer",
+          "null": false,
+          "default": 1,
+          "meaning": "지금 판 번호. 고칠 때마다 1 오름(트리거)"
+        },
+        "carried_from_review_id": {
+          "type": "bigint",
+          "null": true,
+          "unique": true,
+          "references": "reviews.id",
+          "meaning": "고칠 점을 넘겨받은 돌아보기"
+        },
+        "request_key": {
+          "type": "uuid",
+          "null": true,
+          "unique": true,
+          "meaning": "같은 만들기 요청을 알아보는 키"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "처음 만든 때"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "마지막으로 내용이 바뀐 때(트리거)"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        }
+      }
+    },
+    "plan_revisions": {
+      "meaning": "계획 수정 이력. 계획을 고칠 때마다 '고치기 전' 판이 한 줄씩 쌓임(추가만 가능)",
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "plan_id",
+          "revision"
+        ]
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "이력 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "null": false,
+          "references": "plans.id",
+          "meaning": "어느 계획의 이력인지"
+        },
+        "revision": {
+          "type": "integer",
+          "null": false,
+          "meaning": "이 줄이 담은 판 번호"
+        },
+        "title": {
+          "type": "text",
+          "null": false,
+          "meaning": "그 판의 계획 이름"
+        },
+        "success_criteria": {
+          "type": "text",
+          "null": false,
+          "meaning": "그 판의 성공 기준"
+        },
+        "start_date": {
+          "type": "date",
+          "null": false,
+          "meaning": "그 판의 시작일"
+        },
+        "end_date": {
+          "type": "date",
+          "null": false,
+          "meaning": "그 판의 끝일"
+        },
+        "priority": {
+          "type": "smallint",
+          "null": false,
+          "meaning": "그 판의 우선순위"
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "null": false,
+          "unit": "분",
+          "meaning": "그 판의 예상 시간"
+        },
+        "valid_from": {
+          "type": "timestamptz",
+          "null": false,
+          "meaning": "그 판이 쓰이기 시작한 때"
+        },
+        "replaced_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "다음 판으로 바뀐 때"
+        },
+        "change_reason": {
+          "type": "text",
+          "null": true,
+          "check": "300자 이하",
+          "meaning": "그 판을 고친 이유"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        }
+      }
+    },
+    "tasks": {
+      "meaning": "할 일(Do) — 계획에 딸린 할 일",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "할 일 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "null": false,
+          "references": "plans.id",
+          "meaning": "딸린 계획"
+        },
+        "title": {
+          "type": "text",
+          "null": false,
+          "check": "1~200자",
+          "meaning": "할 일 내용"
+        },
+        "note": {
+          "type": "text",
+          "null": true,
+          "check": "2000자 이하",
+          "meaning": "메모"
+        },
+        "due_date": {
+          "type": "date",
+          "null": true,
+          "meaning": "마감일(서울 날짜). 없으면 지연으로 세지 않음"
+        },
+        "priority": {
+          "type": "smallint",
+          "null": false,
+          "default": 2,
+          "check": "1(높음)~3(낮음)",
+          "meaning": "우선순위"
+        },
+        "tags": {
+          "type": "text[]",
+          "null": false,
+          "default": "{}",
+          "check": "10개 이하, 하나에 1~20자, 앞뒤 공백·중복 없음",
+          "meaning": "태그"
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "null": false,
+          "default": 0,
+          "check": "0~100000",
+          "unit": "분",
+          "meaning": "예상 시간"
+        },
+        "status": {
+          "type": "text",
+          "null": false,
+          "default": "open",
+          "check": "'open'(진행 중) | 'done'(완료)",
+          "meaning": "상태"
+        },
+        "completed_at": {
+          "type": "timestamptz",
+          "null": true,
+          "check": "status='done'일 때만 값이 있음",
+          "meaning": "완료한 때"
+        },
+        "deleted_at": {
+          "type": "timestamptz",
+          "null": true,
+          "meaning": "지운 때(값이 있으면 목록·집계에서 빠짐)"
+        },
+        "request_key": {
+          "type": "uuid",
+          "null": true,
+          "unique": true,
+          "meaning": "같은 만들기 요청을 알아보는 키"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "만든 때"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "마지막으로 바뀐 때(트리거)"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        },
+        "planned_on": {
+          "type": "date",
+          "null": true,
+          "meaning": "할 날(서울 날짜) — T07에서 추가"
+        },
+        "planned_slot": {
+          "type": "text",
+          "null": true,
+          "check": "아침·오전·오후·저녁·밤 중 하나, planned_on이 있어야 함",
+          "meaning": "할 시간대 — T07에서 추가"
+        }
+      }
+    },
+    "task_completions": {
+      "meaning": "완료 기록. 완료 버튼 요청 하나(같은 요청 키)는 한 건. 되돌리면 reverted_at이 채워짐(지우지 않음)",
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "request_key"
+        ]
+      ],
+      "partial_unique": [
+        {
+          "columns": [
+            "task_id"
+          ],
+          "where": "reverted_at is null",
+          "name": "task_completions_one_active"
+        }
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "완료 기록 ID"
+        },
+        "task_id": {
+          "type": "bigint",
+          "null": false,
+          "references": "tasks.id",
+          "meaning": "완료한 할 일"
+        },
+        "request_key": {
+          "type": "uuid",
+          "null": false,
+          "unique": true,
+          "meaning": "완료 요청을 알아보는 키"
+        },
+        "completed_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "완료한 때"
+        },
+        "reverted_at": {
+          "type": "timestamptz",
+          "null": true,
+          "check": "completed_at 이후",
+          "meaning": "진행 중으로 되돌린 때"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        }
+      }
+    },
+    "run_logs": {
+      "meaning": "실행 기록(실제로 한 일). 계획·할 일의 예상 값을 덮어쓰지 않는 별도 표",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "실행 기록 ID"
+        },
+        "task_id": {
+          "type": "bigint",
+          "null": false,
+          "references": "tasks.id",
+          "meaning": "기록이 붙은 할 일"
+        },
+        "started_at": {
+          "type": "timestamptz",
+          "null": false,
+          "meaning": "시작 시각"
+        },
+        "ended_at": {
+          "type": "timestamptz",
+          "null": false,
+          "check": "started_at 이상, 24시간 이내",
+          "meaning": "끝난 시각"
+        },
+        "actual_minutes": {
+          "type": "integer",
+          "null": false,
+          "check": "0 이상, 시작~끝 사이 분 이하",
+          "unit": "분",
+          "meaning": "실제로 걸린 시간(쉰 시간 뺄 수 있음, 비우면 시작~끝)"
+        },
+        "blocked_reason": {
+          "type": "text",
+          "null": true,
+          "check": "1~500자(빈 글자는 null로 저장)",
+          "meaning": "막혔던 이유"
+        },
+        "note": {
+          "type": "text",
+          "null": true,
+          "check": "1000자 이하",
+          "meaning": "메모"
+        },
+        "request_key": {
+          "type": "uuid",
+          "null": true,
+          "unique": true,
+          "meaning": "같은 저장 요청을 알아보는 키"
+        },
+        "deleted_at": {
+          "type": "timestamptz",
+          "null": true,
+          "meaning": "취소한 때(값이 있으면 집계에서 빠짐)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "저장한 때"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        }
+      }
+    },
+    "reviews": {
+      "meaning": "돌아보기(See). 돌아본 내용 + 다음 계획으로 넘길 고칠 점 한 줄 + 저장 시점 집계",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity",
+          "meaning": "돌아보기 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "null": false,
+          "references": "plans.id",
+          "meaning": "돌아본 계획"
+        },
+        "reflection": {
+          "type": "text",
+          "null": true,
+          "check": "2000자 이하",
+          "meaning": "돌아본 내용"
+        },
+        "next_fix": {
+          "type": "text",
+          "null": false,
+          "check": "1~200자",
+          "meaning": "다음 계획으로 넘길 고칠 점 한 줄"
+        },
+        "stats": {
+          "type": "jsonb",
+          "null": false,
+          "meaning": "저장 시점 숫자 {today_kst, planned, done, overdue, blocked, estimated_minutes, actual_minutes, diff_minutes}"
+        },
+        "request_key": {
+          "type": "uuid",
+          "null": true,
+          "unique": true,
+          "meaning": "같은 저장 요청을 알아보는 키"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "null": false,
+          "default": "now()",
+          "meaning": "저장한 때"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "references": "auth.users.id (on delete cascade)",
+          "meaning": "주인(가입한 계정). T06 행은 claim_t06_rows로 옮긴 뒤 NOT NULL"
+        }
+      }
+    },
+    "observations": {
+      "meaning": "5일 관찰 설정(사람마다 1개). 1일차 기록이 생기면 고칠 수 없음",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "null": false,
+          "default": "identity"
+        },
+        "owner_id": {
+          "type": "uuid",
+          "null": false,
+          "unique": true
+        },
+        "question": {
+          "type": "text",
+          "check": "1~200자",
+          "meaning": "5일 동안 답할 질문 한 문장"
+        },
+        "metric": {
+          "type": "text",
+          "meaning": "지표 (그날 끝낸 할 일 수)"
+        },
+        "unit": {
+          "type": "text",
+          "meaning": "단위 (개)"
+        },
+        "calc_rule": {
+          "type": "text",
+          "meaning": "계산 규칙"
+        },
+        "missing_rule": {
+          "type": "text",
+          "meaning": "값이 빠졌을 때"
+        },
+        "duplicate_rule": {
+          "type": "text",
+          "meaning": "값이 중복될 때"
+        },
+        "outlier_rule": {
+          "type": "text",
+          "meaning": "값이 튈 때"
+        },
+        "rounding_rule": {
+          "type": "text",
+          "meaning": "반올림"
+        },
+        "week_start": {
+          "type": "text",
+          "meaning": "주 시작 요일"
+        },
+        "plan_rule_before": {
+          "type": "text",
+          "check": "1~300자",
+          "meaning": "바꾸기 전 계획 규칙"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "meaning": "관찰 시작 시각(이 뒤의 완료만 셈)"
+        },
+        "updated_at": {
+          "type": "timestamptz"
+        }
+      }
+    },
+    "observation_days": {
+      "meaning": "하루 기록. 관찰마다 day_no 1~5, 날짜마다 1줄",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint"
+        },
+        "observation_id": {
+          "type": "bigint"
+        },
+        "owner_id": {
+          "type": "uuid"
+        },
+        "day_no": {
+          "type": "smallint",
+          "check": "1~5"
+        },
+        "day_date": {
+          "type": "date",
+          "meaning": "서버가 정한 그날(서울) 날짜"
+        },
+        "value": {
+          "type": "integer",
+          "unit": "개",
+          "check": "0 이상"
+        },
+        "counted_task_ids": {
+          "type": "bigint[]",
+          "meaning": "값을 셀 때 센 할 일 ID(근거)"
+        },
+        "note": {
+          "type": "text",
+          "check": "300자 이하"
+        },
+        "recorded_at": {
+          "type": "timestamptz"
+        },
+        "recount_count": {
+          "type": "integer",
+          "meaning": "같은 날 다시 센 횟수"
+        },
+        "recounted_at": {
+          "type": "timestamptz"
+        }
+      }
+    },
+    "observation_rule_changes": {
+      "meaning": "계획 규칙 변경(관찰마다 1번, 2일차 뒤·3일차 앞)",
+      "primary_key": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "bigint"
+        },
+        "observation_id": {
+          "type": "bigint",
+          "unique": true
+        },
+        "owner_id": {
+          "type": "uuid"
+        },
+        "rule_before": {
+          "type": "text"
+        },
+        "rule_after": {
+          "type": "text",
+          "check": "1~300자"
+        },
+        "reason": {
+          "type": "text",
+          "check": "1~300자"
+        },
+        "after_day1_id": {
+          "type": "bigint",
+          "references": "observation_days.id"
+        },
+        "after_day2_id": {
+          "type": "bigint",
+          "references": "observation_days.id"
+        },
+        "changed_at": {
+          "type": "timestamptz",
+          "meaning": "바꾼 서버 시각"
+        }
+      }
+    }
+  },
+  "relations": [
+    {
+      "from": "plan_revisions.plan_id",
+      "to": "plans.id",
+      "cardinality": "계획 1 : 이력 N",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "tasks.plan_id",
+      "to": "plans.id",
+      "cardinality": "계획 1 : 할 일 N",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "task_completions.task_id",
+      "to": "tasks.id",
+      "cardinality": "할 일 1 : 완료 기록 N (살아 있는 것은 최대 1)",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "run_logs.task_id",
+      "to": "tasks.id",
+      "cardinality": "할 일 1 : 실행 기록 N",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "reviews.plan_id",
+      "to": "plans.id",
+      "cardinality": "계획 1 : 돌아보기 N",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "plans.carried_from_review_id",
+      "to": "reviews.id",
+      "cardinality": "돌아보기 1 : 넘겨받은 다음 계획 0..1 (unique)",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "(모든 표).owner_id",
+      "to": "auth.users.id",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "자식 (부모_id, owner_id)",
+      "to": "부모 (id, owner_id)",
+      "meaning": "부모와 주인이 같은 자식만 만들 수 있음"
+    },
+    {
+      "from": "observation_days.observation_id",
+      "to": "observations.id",
+      "cardinality": "1 : 최대 5"
+    },
+    {
+      "from": "observation_rule_changes.after_day1_id / after_day2_id",
+      "to": "observation_days.id",
+      "cardinality": "변경 1 : 1일차·2일차"
+    }
+  ],
+  "triggers": [
+    {
+      "table": "plans",
+      "name": "plans_keep_revision",
+      "when": "before update",
+      "does": "내용(이름·성공 기준·기간·우선순위·예상 시간)이 바뀌면 고치기 전 판을 plan_revisions에 넣고 revision+1, updated_at=now(). 내용이 같으면 아무것도 바꾸지 않음"
+    },
+    {
+      "table": "plan_revisions",
+      "name": "plan_revisions_append_only",
+      "when": "before update or delete",
+      "does": "오류를 내서 이력을 고치거나 지우지 못하게 함"
+    },
+    {
+      "table": "tasks",
+      "name": "tasks_touch_updated_at",
+      "when": "before update",
+      "does": "updated_at=now()"
+    }
+  ],
+  "review_aggregation": {
+    "target_tasks": "이 계획에 딸린, 지우지 않은(deleted_at is null) 할 일",
+    "planned": "대상 할 일 수",
+    "done": "대상 할 일 중 status='done'인 수",
+    "overdue": "대상 할 일 중 status<>'done' 이고 due_date < 오늘(서울)인 수. 완료한 할 일은 세지 않는다",
+    "blocked": "대상 할 일 중 막힌 이유(blocked_reason, 공백 제외)가 적힌 취소 안 한 실행 기록이 하나라도 있는 수",
+    "estimated_minutes": "대상 할 일의 estimated_minutes 합계(없으면 0)",
+    "actual_minutes": "대상 할 일에 붙은 취소 안 한 실행 기록의 actual_minutes 합계(없으면 0)",
+    "diff_minutes": "actual_minutes - estimated_minutes (없으면 0)",
+    "evidence": "각 숫자와 함께 근거 ID 목록(task_ids / run_log_ids)을 같은 계산에서 돌려주어, 화면에서 숫자를 누르면 그 기록으로 갈 수 있다",
+    "computed_by": "pds_private.plan_summary(plan_id) — public.review_summary, public.get_plan_bundle, public.add_review가 함께 씀"
+  },
+  "api": {
+    "transport": "Supabase Data API(PostgREST) RPC: POST {SUPABASE_URL}/rest/v1/rpc/{함수}. 헤더 apikey = Publishable key, Authorization = Bearer {Supabase Auth 액세스 토큰}. ping()만 토큰 없이 부를 수 있음",
+    "read": {
+      "ping()": "살아 있는지(자료 수는 안 알려 줌)",
+      "whoami()": "로그인한 사람·세션·토큰 만료",
+      "list_plans(p_owner_id?)": "내 계획 목록 (p_owner_id는 받기만 하고 무시)",
+      "get_plan_bundle(p_plan_id, p_owner_id?)": "내 계획 하나의 모든 자료 (남의 것·없는 것은 404)",
+      "review_summary(p_plan_id)": "돌아보기 집계",
+      "export_all(p_owner_id?)": "내 자료 전체",
+      "get_observation()": "5일 관찰 설정·기록·규칙 변경·집계"
+    },
+    "write": {
+      "create_plan(p_title, p_success_criteria, p_start_date, p_end_date, p_priority, p_estimated_minutes, p_carried_from_review_id, p_request_key)": "계획 만들기",
+      "update_plan(p_id, p_expected_revision, p_title, p_success_criteria, p_start_date, p_end_date, p_priority, p_estimated_minutes, p_change_reason)": "계획 고치기(판 번호가 다르면 거절)",
+      "carry_review(p_review_id, p_plan_id)": "고칠 점을 이미 있는 다른 계획으로 넘기기",
+      "complete_task(p_id, p_request_key)": "완료로 바꾸기(중복 요청은 기록 1건)",
+      "reopen_task(p_id)": "진행 중으로 되돌리기",
+      "delete_task(p_id)": "할 일 지우기(soft delete)",
+      "restore_task(p_id)": "지운 할 일 되살리기",
+      "add_run_log(p_task_id, p_started_at, p_ended_at, p_actual_minutes, p_blocked_reason, p_note, p_request_key)": "실행 기록 남기기",
+      "delete_run_log(p_id)": "실행 기록 취소(soft delete)",
+      "add_review(p_plan_id, p_reflection, p_next_fix, p_request_key)": "돌아보기 저장(저장 시점 집계 포함)",
+      "create_task(... , p_planned_on, p_planned_slot, p_request_key)": "할 일 만들기",
+      "update_task(... , p_planned_on, p_planned_slot)": "할 일 고치기",
+      "start_observation(p_question, p_plan_rule_before)": "5일 관찰 시작(1일차 전까지 다시 부르면 고침)",
+      "record_observation_day(p_note)": "오늘 기록(같은 날 다시 부르면 다시 셈)",
+      "change_plan_rule(p_rule_after, p_reason)": "계획 규칙 한 번 바꾸기",
+      "delete_my_account(p_confirm)": "계정과 모든 자료 삭제 (p_confirm = \"계정 삭제\")"
+    },
+    "errors": "입력이 규칙에 어긋나면 HTTP 400과 한국어 message를 돌려준다",
+    "auth": {
+      "signup": "POST /auth/v1/signup {email,password}",
+      "login": "POST /auth/v1/token?grant_type=password",
+      "refresh": "POST /auth/v1/token?grant_type=refresh_token",
+      "logout": "POST /auth/v1/logout?scope=local|global",
+      "password": "PUT /auth/v1/user {password}"
+    }
+  },
+  "security": {
+    "login": "Supabase Auth(GoTrue v2.197.0) 이메일·비밀번호. 비밀번호는 bcrypt로 Supabase Auth가 보관. 앱은 비밀번호를 저장하지 않음",
+    "token": "액세스 토큰(JWT, ES256 서명, 1시간 만료) + 리프레시 토큰. 브라우저 탭의 sessionStorage에만 두고 Authorization 헤더로만 보냄(URL에 안 실음)",
+    "signing_key": "토큰 서명 비밀키는 Supabase Auth 안에만 있음. 브라우저·배포 파일·Git에는 공개키조차 없고 Publishable key만 있음",
+    "who": "모든 함수 맨 앞 pds_private.require_user(): role=authenticated, sub=사용자, session_id가 auth.sessions에 살아 있어야 함. 아니면 401",
+    "ownership": "owner_id = 토큰 사용자인 행만. 남의 행·없는 행은 404(PDS404)",
+    "anon": "로그인 안 한 역할은 ping()만 실행 가능. 나머지는 401",
+    "table_access": "모든 표에 RLS를 켜고 anon·authenticated 역할에는 표 권한을 주지 않는다. 브라우저는 표를 직접 읽거나 쓸 수 없다",
+    "csp": "index.html에 Content-Security-Policy를 두어 스크립트는 같은 출처 파일만, 연결은 같은 출처와 *.supabase.co만 허용한다"
+  },
+  "continued_from": {
+    "task": "ALEPH T06",
+    "result_url": "https://dochihs.github.io/pds-diary/#plan=1",
+    "source_commit": "c55e544c1bfd8b0485017e11dafa9d7fc9a10eec",
+    "schema": "pds-schema-v2"
+  }
+}
