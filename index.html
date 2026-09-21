@@ -5,18 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
-  <meta name="description" content="계획(Plan) → 실제로 한 일(Do) → 돌아보기(See)가 하나로 이어지는 다이어리">
+  <meta name="description" content="계획(Plan) → 실제로 한 일(Do) → 돌아보기(See)가 하나로 이어지는 다이어리 — 로그인한 사람만 자기 기록을 봅니다">
   <title>Plan · Do · See</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
   <script src="config.js" defer></script>
   <script src="app.js" defer></script>
 </head>
-<body>
+<body class="logged-out">
   <div class="notice" id="public-notice" role="note">
-    <strong class="notice-label">공개 안내</strong>
-    <span id="public-notice-text">지금은 로그인이 없어 링크를 아는 사람은 누구나 볼 수 있습니다. 남이 봐도 괜찮은 내용만 넣으세요.</span>
-    <span class="notice-sub">잠그는 일(로그인)은 다음 과제에서 붙입니다.</span>
+    <strong class="notice-label">잠긴 다이어리</strong>
+    <span id="public-notice-text">내 기록은 로그인한 뒤에만 보입니다. 계정마다 자료가 서버에서 나뉘어, 다른 계정의 자료는 읽을 수도 고칠 수도 없습니다.</span>
   </div>
 
   <header class="top">
@@ -33,6 +32,10 @@
       </label>
       <button type="button" id="btn-new-plan" class="btn">새 계획</button>
       <button type="button" id="btn-export" class="btn">내 자료 전체 내보내기 (JSON)</button>
+      <span class="account-chip" id="account-chip" hidden>
+        <span id="account-email" class="small"></span>
+        <button type="button" id="btn-logout" class="btn small-btn">로그아웃</button>
+      </span>
     </div>
   </header>
 
@@ -41,6 +44,8 @@
     <a href="#sec-tasks" data-jump="sec-tasks"><b>2</b> 할 일</a>
     <a href="#sec-logs" data-jump="sec-logs"><b>3</b> 실행 기록</a>
     <a href="#sec-review" data-jump="sec-review"><b>4</b> 돌아보기</a>
+    <a href="#sec-obs" data-jump="sec-obs"><b>5</b> 5일 관찰</a>
+    <a href="#sec-account" data-jump="sec-account"><b>·</b> 내 계정</a>
   </nav>
 
   <div id="status" class="status" role="status" aria-live="polite"></div>
@@ -52,8 +57,9 @@
 
   <footer class="foot">
     <p>저장 위치: 서버 데이터베이스(Supabase) · 날짜와 시각은 모두 <b>서울 시간(KST, UTC+9)</b>으로 보여 줍니다 · 시간 단위: <b>분</b></p>
+    <p>이 앱은 T06 최종 제출(결과물 <a href="https://dochihs.github.io/pds-diary/#plan=1">dochihs.github.io/pds-diary/#plan=1</a> · 소스 commit <code>c55e544c1bfd8b0485017e11dafa9d7fc9a10eec</code>)에 가입·로그인을 이어 붙인 T07 판입니다.</p>
     <p>
-      <a href="contracts/pds-schema-v2.json">DB 구조 문서 (pds-schema-v2.json)</a>
+      <a href="contracts/pds-schema-v3.json">DB 구조 문서 (pds-schema-v3.json)</a>
       · <a id="source-link" href="https://github.com/dochiHS/pds-diary" rel="noopener">소스</a>
     </p>
   </footer>
