@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>T07 확인 기록 만들기</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../style.css">
+  <script src="../config.js" defer></script>
+  <script src="auth-evidence.js" defer></script>
+</head>
+<body>
+  <main>
+    <section class="sec">
+      <h2 class="sec-title">T07 확인 기록 만들기 <small>성공한 요청과 거절된 요청을 나란히</small></h2>
+      <p>실제 Supabase에 시험 계정 3개(A·B·C)를 새로 만들고, 로그인 없이·로그아웃 뒤·비밀번호 변경 뒤·남의 자료에 요청해 봅니다.
+         비밀번호는 이 페이지가 무작위로 만들어 쓰고 버리며, 기록에는 비밀번호·토큰을 모두 가려서 남깁니다. 시험 계정 C는 마지막에 스스로 지웁니다.</p>
+      <div class="card form">
+        <label class="field"><span class="field-label">시험 계정 이메일 도메인</span><input id="domain" type="text" value="example.com"></label>
+        <div class="actions">
+          <button type="button" class="btn primary" id="run">검사 실행 (시험 계정 3개 생성)</button>
+          <button type="button" class="btn" id="download" disabled>기록 받기 (Markdown)</button>
+        </div>
+        <p class="check" id="summary"></p>
+      </div>
+      <ol id="progress" class="small"></ol>
+      <pre id="report" class="pre small"></pre>
+    </section>
+  </main>
+</body>
+</html>
